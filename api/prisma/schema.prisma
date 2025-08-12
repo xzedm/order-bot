@@ -1,0 +1,95 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum OrderStatus {
+  NEW
+  PENDING
+  CONFIRMED
+  PAID
+  SHIPPED
+  CLOSED
+  CANCELLED
+}
+
+model Customer {
+  id        String    @id @default(cuid())
+  phone     String    @unique
+  name      String?
+  email     String?
+  locale    String?   @default("ru")
+  tgUserId  String?
+  createdAt DateTime  @default(now())
+  orders    Order[]
+  messages  Message[]
+}
+
+model Product {
+  id         String      @id @default(cuid())
+  sku        String      @unique
+  name       String
+  price      Decimal     @db.Decimal
+  currency   String      @default("KZT")
+  stockQty   Int         @default(0)
+  isActive   Boolean     @default(true)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  orderItems OrderItem[]
+}
+
+model Order {
+  id          String      @id @default(cuid())
+  number      String      @unique
+  customer    Customer    @relation(fields: [customerId], references: [id])
+  customerId  String
+  status      OrderStatus @default(NEW)
+  totalAmount Decimal     @db.Decimal
+  currency    String      @default("KZT")
+  source      String
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  items       OrderItem[]
+  message     Message[]
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  order     Order   @relation(fields: [orderId], references: [id])
+  orderId   String
+  product   Product @relation(fields: [productId], references: [id])
+  productId String
+  sku       String
+  name      String
+  qty       Int
+  price     Decimal @db.Decimal
+  amount    Decimal @db.Decimal
+}
+
+model Message {
+  id         String      @id @default(cuid())
+  customer   Customer    @relation(fields: [customerId], references: [id])
+  customerId String
+  order      Order?      @relation(fields: [orderId], references: [id])
+  orderId    String?
+  channel    String
+  direction  String // in|out
+  body       String
+  meta       Json?
+  createdAt  DateTime    @default(now())
+  extraction Extraction?
+}
+
+model Extraction {
+  id         String   @id @default(cuid())
+  message    Message  @relation(fields: [messageId], references: [id])
+  messageId  String   @unique
+  intent     String
+  confidence Float
+  payload    Json
+  createdAt  DateTime @default(now())
+}
