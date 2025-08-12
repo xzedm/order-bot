@@ -3,6 +3,7 @@ import { TelegrafModule } from 'nestjs-telegraf';
 import { TelegramUpdate } from './telegram.update';
 import { ExtractionModule } from '../extraction/extraction.module';
 import { ConversationModule } from '../ai/conversation.module';
+import { ProductService } from '../products/product.service';
 
 @Module({
   imports: [
@@ -13,6 +14,6 @@ import { ConversationModule } from '../ai/conversation.module';
     ExtractionModule,
     ConversationModule,
   ],
-  providers: [TelegramUpdate],
+  providers: [TelegramUpdate, ProductService],
 })
 export class TelegramModule {}
