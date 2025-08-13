@@ -1,8 +1,7 @@
-// src/telegram/telegram.update.ts
 import { Ctx, On, Update } from 'nestjs-telegraf';
 import { ExtractionService } from '../extraction/extraction.service';
 import { ConversationService } from '../ai/conversation.service';
-import { ProductService } from '../products/product.service';
+import { ProductService, Product } from '../products/product.service';
 
 @Update()
 export class TelegramUpdate {
@@ -19,32 +18,31 @@ export class TelegramUpdate {
     const text = ctx.message?.text as string;
     const userId = ctx.from.id;
 
-    // Save history
+    // Save chat history
     const history = this.userHistories.get(userId) || [];
     history.push({ role: 'user', content: text });
 
-    // Step 1: extract structured info from user text
+    // Step 1: Extract structured info from user text using LLM
     const res = await this.extraction.extract(text);
 
-    // Step 2: find matching products
-    let foundProducts: any[] = [];
+    // Step 2: Determine product names to search based on intent
+    let productNames: string[] = [];
+    if (res.intent === 'place_order' && res.items?.length) {
+      productNames = res.items.map(item => item.english_name || item.name);
+    } else if (res.intent === 'product_inquiry' && res.products?.length) {
+      productNames = res.products.map(prod => prod.english_name || prod.name);
+    }
 
-    // from ExtractionService items
-    if (res.items && res.items.length) {
-      for (const item of res.items) {
-        const matches = this.productService.findByName(item.name);
-        if (matches.length) {
-          foundProducts.push(...matches);
-        }
+    // Step 3: Find matching products from Supabase
+    const foundProducts: Product[] = [];
+    for (const name of productNames) {
+      const matches = await this.productService.findByName(name);
+      if (matches.length) {
+        foundProducts.push(...matches);
       }
     }
 
-    // fallback: direct scan of the whole text
-    if (!foundProducts.length) {
-      foundProducts = this.productService.searchInText(text);
-    }
-
-    // Step 3: build product context for AI
+    // Step 4: Build product context for AI
     let productContext = '';
     if (foundProducts.length) {
       productContext =
@@ -52,22 +50,28 @@ export class TelegramUpdate {
         foundProducts
           .map(
             (p) =>
-              `${p.name} — ${p.price}₸ (SKU: ${p.sku})${
-                p.stock ? ` — stock: ${p.stock}` : ''
-              }`
+              `${p.name} — ${p.price}₸ (SKU: ${p.sku})${p.url ? ` — url: ${p.url}` : ''}`
           )
           .join('\n');
     }
 
-    // Step 4: get AI reply
+    // Optional: Build hints based on extraction (expand as needed)
+    let hints: any = {};
+    if (res.intent === 'place_order' && res.items) {
+      hints.draftSummary = res.items.map(i => `${i.name} x${i.qty}`).join(', ');
+    }
+    // Add more logic for missing fields, locale, etc., if needed
+
+    // Step 5: Get AI reply with context
     const aiReply = await this.conversation.reply(
       [
         ...history,
-        productContext ? { role: 'system', content: productContext } : null
-      ].filter(Boolean) as any
+        productContext ? { role: 'system', content: productContext } : null,
+      ].filter(Boolean) as any,
+      hints // Pass hints
     );
 
-    // Step 5: send and save reply
+    // Step 6: Send reply and store in history
     await ctx.reply(aiReply);
     history.push({ role: 'assistant', content: aiReply });
     this.userHistories.set(userId, history);
