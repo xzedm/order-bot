@@ -6,7 +6,14 @@ import { json } from 'body-parser';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { cors: true });
+  const app = await NestFactory.create(AppModule, { 
+    cors: {
+      origin: ['http://localhost:3000', 'https://yourdomain.com'], // Add your domains
+      methods: ['GET', 'POST'],
+      allowedHeaders: ['Content-Type', 'Authorization'],
+    }
+  });
+  
   app.use(json({ limit: '1mb' }));
 
   const config = new DocumentBuilder()
@@ -18,8 +25,7 @@ async function bootstrap() {
 
   const port = process.env.PORT || 8080;
   await app.listen(port);
-  // Long polling для Telegram стартует автоматически через nestjs-telegraf
-  // (webhook не нужен на этом шаге).
-  // Открой /api/docs для проверки API.
+  console.log(`🚀 Server running on http://localhost:${port}`);
+  console.log(`📚 API docs available at http://localhost:${port}/api/docs`);
 }
 bootstrap();
