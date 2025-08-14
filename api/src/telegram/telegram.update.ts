@@ -42,18 +42,24 @@ export class TelegramUpdate {
       }
     }
 
-    // Step 4: Build product context for AI
+    // Step 4: Build product context for AI (only real DB products)
     let productContext = '';
+
     if (foundProducts.length) {
       productContext =
-        'Product info:\n' +
+        'Here are the ONLY available products in our inventory:\n' +
         foundProducts
           .map(
             (p) =>
               `${p.name} — ${p.price}₸ (SKU: ${p.sku})${p.url ? ` — url: ${p.url}` : ''}`
           )
-          .join('\n');
+          .join('\n') +
+        '\nIf a product is not listed above, tell the user it is not available.';
+    } else {
+      productContext =
+        'No matching products were found in the database. Politely tell the user that we do not have this product.';
     }
+
 
     // Optional: Build hints based on extraction (expand as needed)
     let hints: any = {};

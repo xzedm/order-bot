@@ -22,7 +22,7 @@ interface ApiResponse {
   reply?: string;
   orderId?: string;
   products?: Product[];
-  message?: string; // Added for error responses
+  message?: string;
 }
 
 const WebChatWidget = () => {
@@ -33,11 +33,9 @@ const WebChatWidget = () => {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Initialize session
   useEffect(() => {
-    const sid = localStorage.getItem('chat-session-id') || `web-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const sid = `web-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     setSessionId(sid);
-    localStorage.setItem('chat-session-id', sid);
 
     if (isOpen && messages.length === 0) {
       setMessages([{
@@ -49,12 +47,10 @@ const WebChatWidget = () => {
     }
   }, [isOpen, messages.length]);
 
-  // Scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Send message to backend
   const sendMessage = async (text: string) => {
     if (!text.trim() || !sessionId) return;
 
@@ -121,16 +117,16 @@ const WebChatWidget = () => {
   };
 
   const ProductCard = ({ product }: { product: Product }) => (
-    <div className="bg-gray-50 border rounded-lg p-3 mb-2 max-w-xs">
-      <div className="font-medium text-sm text-gray-800">{product.name}</div>
+    <div className="bg-white border border-gray-200 rounded-lg p-3 mb-2 shadow-sm max-w-xs">
+      <div className="font-medium text-sm text-gray-900">{product.name}</div>
       <div className="text-blue-600 font-semibold">{product.price}₸</div>
-      <div className="text-xs text-gray-500">SKU: {product.sku}</div>
+      <div className="text-xs text-gray-600">SKU: {product.sku}</div>
       {product.url && (
         <a 
           href={product.url} 
           target="_blank" 
           rel="noopener noreferrer"
-          className="text-xs text-blue-500 hover:underline mt-1 block"
+          className="text-xs text-blue-500 hover:text-blue-700 mt-1 block"
         >
           Подробнее
         </a>
@@ -142,11 +138,11 @@ const WebChatWidget = () => {
     <div className={`mb-4 ${message.sender === 'user' ? 'text-right' : 'text-left'}`}>
       <div className={`inline-block max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${
         message.sender === 'user'
-          ? 'bg-blue-500 text-white'
+          ? 'bg-blue-600 text-white'
           : message.isError
-          ? 'bg-red-100 text-red-800 border border-red-200'
-          : 'bg-gray-100 text-gray-800'
-      }`}>
+          ? 'bg-red-50 text-red-700 border border-red-200'
+          : 'bg-gray-50 text-gray-900'
+      } shadow-md`}>
         <div className="text-sm whitespace-pre-wrap">{message.text}</div>
         
         {message.products && message.products.length > 0 && (
@@ -158,8 +154,8 @@ const WebChatWidget = () => {
         )}
         
         {message.orderId && (
-          <div className="mt-2 p-2 bg-green-100 border border-green-200 rounded text-xs">
-            <CheckCircle size={12} className="inline mr-1" />
+          <div className="mt-2 p-2 bg-green-50 border border-green-200 rounded text-xs">
+            <CheckCircle size={12} className="inline mr-1 text-green-500" />
             Заказ создан: <strong>{message.orderId}</strong>
           </div>
         )}
@@ -174,35 +170,35 @@ const WebChatWidget = () => {
   );
 
   return (
-    <div className="fixed bottom-4 right-4 z-50">
+    <div className="fixed bottom-6 right-6 z-50">
       {isOpen && (
-        <div className="bg-white border border-gray-200 rounded-lg shadow-xl mb-4 w-80 h-96 flex flex-col" role="dialog" aria-label="Chat Widget">
-          <div className="bg-blue-600 text-white p-4 rounded-t-lg flex justify-between items-center">
+        <div className="bg-white border border-gray-200 rounded-xl shadow-2xl w-96 h-[500px] flex flex-col mb-4 transition-all duration-300" role="dialog" aria-label="Chat Widget">
+          <div className="bg-blue-600 text-white p-4 rounded-t-xl flex justify-between items-center">
             <div>
-              <h3 className="font-semibold">Kerneu Group</h3>
+              <h3 className="font-bold text-lg">Kerneu Group</h3>
               <p className="text-xs text-blue-100">Помощник по заказам</p>
             </div>
             <button
               onClick={() => setIsOpen(false)}
-              className="text-white hover:text-gray-200"
+              className="text-white hover:text-gray-200 transition-colors"
               aria-label="Close chat"
             >
               <X size={20} />
             </button>
           </div>
 
-          <div className="flex-1 p-4 overflow-y-auto bg-white">
+          <div className="flex-1 p-5 overflow-y-auto bg-gray-50">
             {messages.map((message) => (
               <MessageBubble key={message.id} message={message} />
             ))}
             
             {isTyping && (
               <div className="text-left mb-4">
-                <div className="inline-block bg-gray-100 px-4 py-2 rounded-lg">
+                <div className="inline-block bg-gray-50 px-4 py-2 rounded-lg shadow-sm">
                   <div className="flex space-x-1">
-                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
-                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
+                    <div className="w-2 h-2 bg-blue-300 rounded-full animate-bounce"></div>
+                    <div className="w-2 h-2 bg-blue-300 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
+                    <div className="w-2 h-2 bg-blue-300 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
                   </div>
                 </div>
               </div>
@@ -211,7 +207,7 @@ const WebChatWidget = () => {
             <div ref={messagesEndRef} />
           </div>
 
-          <div className="p-4 border-t border-gray-200">
+          <div className="p-4 border-t border-gray-200 bg-white rounded-b-xl">
             <div className="flex space-x-2">
               <input
                 type="text"
@@ -224,14 +220,14 @@ const WebChatWidget = () => {
                   }
                 }}
                 placeholder="Напишите сообщение..."
-                className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="flex-1 border border-gray-300 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
                 disabled={isTyping}
                 aria-label="Type your message"
               />
               <button
                 onClick={() => sendMessage(inputText)}
                 disabled={!inputText.trim() || isTyping}
-                className="bg-blue-600 text-white p-2 rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                className="bg-blue-600 text-white p-2 rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
                 aria-label="Send message"
               >
                 <Send size={16} />
@@ -241,13 +237,15 @@ const WebChatWidget = () => {
         </div>
       )}
 
-      <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="bg-blue-600 hover:bg-blue-700 text-white p-4 rounded-full shadow-lg transition-all duration-200 hover:scale-105"
-        aria-label={isOpen ? 'Close chat' : 'Open chat'}
-      >
-        {isOpen ? <X size={24} /> : <MessageCircle size={24} />}
-      </button>
+      {!isOpen && (
+        <button
+          onClick={() => setIsOpen(true)}
+          className="bg-blue-600 hover:bg-blue-700 text-white p-3 rounded-full shadow-lg transition-all duration-200 hover:scale-105"
+          aria-label="Open chat"
+        >
+          <MessageCircle size={24} />
+        </button>
+      )}
     </div>
   );
 };
