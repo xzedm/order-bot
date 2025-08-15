@@ -12,6 +12,7 @@ export interface Product {
   price: number;
   sku: string;
   url?: string;
+  qty: number;
 }
 
 @Injectable()
