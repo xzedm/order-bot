@@ -1,3 +1,6 @@
+import { NotificationsModule } from './../notifications/notifications.module';
+import { OrdersModule } from './../orders/orders.module';
+import { ProductsModule } from './../products/products.module';
 import { Module } from '@nestjs/common';
 import { TelegrafModule } from 'nestjs-telegraf';
 import { TelegramUpdate } from './telegram.update';
@@ -13,6 +16,9 @@ import { ProductService } from '../products/product.service';
     }),
     ExtractionModule,
     ConversationModule,
+    ProductsModule,
+    OrdersModule,
+    NotificationsModule
   ],
   providers: [TelegramUpdate, ProductService],
 })

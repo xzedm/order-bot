@@ -1,103 +1,660 @@
-import { Ctx, On, Update } from 'nestjs-telegraf';
+// api/src/telegram/telegram.update.ts
+import { Ctx, On, Update, Start, Command, Action } from 'nestjs-telegraf';
 import { ExtractionService } from '../extraction/extraction.service';
 import { ConversationService } from '../ai/conversation.service';
 import { ProductService, Product } from '../products/product.service';
+import { OrderService } from '../orders/order.service';
+import { ManagerNotificationService } from '../notifications/manager-notification.service';
+
+interface UserSession {
+  messages: any[];
+  lastProducts: Product[];
+  pendingOrder?: {
+    items: Array<{ name: string; sku?: string; qty: number; price: number }>; // Added price
+    customerName?: string;
+    customerPhone?: string;
+    customerEmail?: string;
+    step: 'collecting_info' | 'confirming' | 'ready';
+  };
+  locale: 'ru' | 'en';
+}
 
 @Update()
 export class TelegramUpdate {
-  private userHistories = new Map<number, { messages: any[], lastProducts: Product[] }>();
+  private userSessions = new Map<number, UserSession>();
 
   constructor(
     private readonly extraction: ExtractionService,
     private readonly conversation: ConversationService,
-    private readonly productService: ProductService
+    private readonly productService: ProductService,
+    private readonly orderService: OrderService,
+    private readonly managerNotification: ManagerNotificationService
   ) {}
+
+  @Start()
+  async start(@Ctx() ctx: any) {
+    const userId = ctx.from.id;
+    const userLang = ctx.from.language_code;
+    const locale = userLang === 'en' ? 'en' : 'ru';
+
+    // Initialize user session
+    this.userSessions.set(userId, {
+      messages: [],
+      lastProducts: [],
+      locale: locale
+    });
+
+    const welcomeMessage = locale === 'en' 
+      ? `👋 Welcome to Kerneu Group!\n\nI can help you place orders for electronics and components. Just tell me what you need!\n\nExamples:\n• "I need 2 Arduino Uno"\n• "Show me Raspberry Pi prices"\n• "Check order status KG-2025-000123"\n\nType /help for more commands.`
+      : `👋 Добро пожаловать в Kerneu Group!\n\nЯ помогу вам оформить заказы на электронику и компоненты. Просто скажите, что вам нужно!\n\nПримеры:\n• "Мне нужно 2 Arduino Uno"\n• "Покажи цены на Raspberry Pi"\n• "Проверь статус заказа KG-2025-000123"\n\nНапишите /help для списка команд.`;
+
+    await ctx.reply(welcomeMessage);
+  }
+
+  @Command('help')
+  async help(@Ctx() ctx: any) {
+    const userId = ctx.from.id;
+    const session = this.userSessions.get(userId);
+    const locale = session?.locale || 'ru';
+
+    const helpMessage = locale === 'en'
+      ? `🤖 <b>Available Commands:</b>\n\n/start - Start conversation\n/help - Show this help\n/status - Check order status\n/cancel - Cancel current operation\n/lang - Change language\n\n<b>How to order:</b>\n1. Tell me what products you need\n2. Provide your contact details\n3. Confirm the order\n\n<b>Examples:</b>\n• "I want 3 Arduino Uno and 2 Raspberry Pi"\n• "What's the price of ESP32?"\n• "Check order KG-2025-000123"`
+      : `🤖 <b>Доступные команды:</b>\n\n/start - Начать диалог\n/help - Показать эту справку\n/status - Проверить статус заказа\n/cancel - Отменить текущую операцию\n/lang - Сменить язык\n\n<b>Как оформить заказ:</b>\n1. Скажите какие товары нужны\n2. Укажите контактные данные\n3. Подтвердите заказ\n\n<b>Примеры:</b>\n• "Хочу 3 Arduino Uno и 2 Raspberry Pi"\n• "Какая цена ESP32?"\n• "Проверь заказ KG-2025-000123"`;
+
+    await ctx.reply(helpMessage, { parse_mode: 'HTML' });
+  }
+
+  @Command('status')
+  async checkStatus(@Ctx() ctx: any) {
+    const text = ctx.message.text.replace('/status', '').trim();
+    const userId = ctx.from.id;
+    const session = this.userSessions.get(userId);
+    const locale = session?.locale || 'ru';
+
+    if (text) {
+      // Order number provided
+      await this.handleOrderStatusCheck(ctx, text);
+    } else {
+      // Ask for order number
+      const message = locale === 'en'
+        ? 'Please provide the order number (format: KG-YYYY-XXXXXX):'
+        : 'Пожалуйста, укажите номер заказа (формат: KG-YYYY-XXXXXX):';
+      await ctx.reply(message);
+    }
+  }
+
+  @Command('cancel')
+  async cancel(@Ctx() ctx: any) {
+    const userId = ctx.from.id;
+    const session = this.userSessions.get(userId);
+    
+    if (session) {
+      session.pendingOrder = undefined;
+      this.userSessions.set(userId, session);
+    }
+
+    const locale = session?.locale || 'ru';
+    const message = locale === 'en' 
+      ? '❌ Operation cancelled. How can I help you?'
+      : '❌ Операция отменена. Чем могу помочь?';
+    
+    await ctx.reply(message);
+  }
+
+  @Command('lang')
+  async changeLanguage(@Ctx() ctx: any) {
+    const userId = ctx.from.id;
+    const session = this.userSessions.get(userId) || { messages: [], lastProducts: [], locale: 'ru' };
+    
+    // Toggle language
+    session.locale = session.locale === 'ru' ? 'en' : 'ru';
+    this.userSessions.set(userId, session);
+
+    const message = session.locale === 'en'
+      ? '🌍 Language changed to English'
+      : '🌍 Язык изменен на русский';
+
+    await ctx.reply(message);
+  }
+
+  // Handle manager callback actions (order confirmations, rejections, etc.)
+  @Action(/^(confirm_order|reject_order|contact_customer|edit_order):(.+)$/)
+  async handleManagerAction(@Ctx() ctx: any) {
+    await this.managerNotification.handleManagerAction(ctx.callbackQuery);
+    await ctx.answerCbQuery();
+  }
 
   @On('text')
   async onText(@Ctx() ctx: any) {
     const text = ctx.message?.text as string;
     const userId = ctx.from.id;
 
-    // Load or initialize user history
-    const userData = this.userHistories.get(userId) || { messages: [], lastProducts: [] };
-    const history = userData.messages;
-    history.push({ role: 'user', content: text });
-
-    // Step 1: Extract structured info from user text
-    const res = await this.extraction.extract(text);
-
-    // Step 2: Determine product names to search
-    let productNames: string[] = [];
-    if (res.intent === 'place_order' && res.items?.length) {
-      productNames = res.items.map(item => item.english_name || item.name);
-    } else if (res.intent === 'product_inquiry' && res.products?.length) {
-      productNames = res.products.map(prod => prod.english_name || prod.name);
-    } else if (!productNames.length && userData.lastProducts.length) {
-      // Fallback to last mentioned products for follow-up questions
-      productNames = userData.lastProducts.map(p => p.name);
+    // Initialize session if not exists
+    let session = this.userSessions.get(userId);
+    if (!session) {
+      session = { messages: [], lastProducts: [], locale: 'ru' };
+      this.userSessions.set(userId, session);
     }
 
-    // Step 3: Find matching products from Supabase
-    let foundProducts: Product[] = userData.lastProducts; // Reuse last products if applicable
-    if (productNames.length && !foundProducts.length) {
-      for (const name of productNames) {
-        const matches = await this.productService.findByName(name);
-        if (matches.length) {
-          foundProducts.push(...matches);
+    // Check if it's an order status query
+    if (this.isOrderNumberQuery(text)) {
+      await this.handleOrderStatusCheck(ctx, text);
+      return;
+    }
+
+    // Add user message to history
+    session.messages.push({ role: 'user', content: text });
+
+    try {
+      // Step 1: Extract structured info from user text
+      const extracted = await this.extraction.extract(text);
+      console.log('🔍 Extraction result:', extracted);
+
+      // Step 2: Handle different intents
+      if (extracted.intent === 'place_order' && extracted.items?.length) {
+        await this.handleOrderIntent(ctx, session, extracted, text);
+      } else if (extracted.intent === 'product_inquiry') {
+        await this.handleProductInquiry(ctx, session, extracted, text);
+      } else if (extracted.intent === 'check_status') {
+        // Try to extract order number from text
+        const orderNumberMatch = text.match(/KG-\d{4}-\d{6}/i);
+        if (orderNumberMatch) {
+          await this.handleOrderStatusCheck(ctx, orderNumberMatch[0]);
+        } else {
+          const message = session.locale === 'en'
+            ? 'Please provide the order number in format KG-YYYY-XXXXXX'
+            : 'Пожалуйста, укажите номер заказа в формате KG-YYYY-XXXXXX';
+          await ctx.reply(message);
+        }
+      } else {
+        // Handle as general conversation or collect missing order info
+        await this.handleGeneralMessage(ctx, session, extracted, text);
+      }
+
+    } catch (error) {
+      console.error('❌ Error processing message:', error);
+      
+      const errorMessage = session.locale === 'en'
+        ? 'Sorry, I encountered an error. Please try again or contact our support.'
+        : 'Извините, произошла ошибка. Попробуйте еще раз или обратитесь в поддержку.';
+      
+      await ctx.reply(errorMessage);
+    }
+  }
+
+  private async handleOrderIntent(ctx: any, session: UserSession, extracted: any, originalText: string) {
+    const userId = ctx.from.id;
+
+    // Log extraction result for debugging
+    console.log('🔍 Extracted items for order:', extracted.items);
+
+    // Try to match extracted items with lastProducts first
+    const foundProducts: Product[] = [];
+    for (const item of extracted.items) {
+      const productName = item.english_name || item.name;
+      // First, check session.lastProducts for a match
+      let product = session.lastProducts.find(p =>
+        p.name.toLowerCase().includes(productName.toLowerCase()) ||
+        (item.sku && p.sku === item.sku)
+      );
+
+      // If no match in lastProducts, search the database
+      if (!product) {
+        const matches = await this.productService.findByName(productName);
+        if (matches.length > 0) {
+          product = matches[0]; // Take the first match
         }
       }
-    }
 
-    // Log for debugging
-    console.log('Extracted:', res);
-    console.log('Found Products:', foundProducts);
-
-    // Step 4: Build product context
-    let productContext = '';
-    if (foundProducts.length) {
-      productContext =
-        'Available products in inventory:\n' +
-        foundProducts
-          .map(
-            (p) =>
-              `${p.name} — ${p.price}₸ — Qty: ${p.qty ?? 'Unknown'} (SKU: ${p.sku})` +
-              (p.url ? ` — url: ${p.url}` : '')
-          )
-          .join('\n') +
-        '\nIf a product is not listed, it is not available. Maintain consistency with prior responses.';
-    } else {
-      productContext =
-        'No matching products found. Politely inform the user the product is unavailable and suggest alternatives if possible.';
-    }
-
-    // Step 5: Build hints
-    let hints: any = {};
-    if (res.intent === 'place_order' && res.items?.length) {
-      const item = res.items[0];
-      const product = foundProducts.find(p => p.name.includes(item.name));
-      if (product && product.qty >= item.qty) {
-        hints.draftSummary = `${item.name} x${item.qty}`;
-        hints.totalPrice = product.price * item.qty;
-        hints.availableQty = product.qty;
+      if (product) {
+        foundProducts.push(product);
       } else {
-        hints.error = `Requested quantity (${item.qty}) exceeds available stock (${product?.qty || 0}).`;
+        console.log(`⚠️ Product not found for: ${productName}`);
       }
     }
 
-    // Step 6: Get AI reply with context
-    const systemPrompt = `You are a helpful sales bot. Maintain consistency with prior responses. If you previously said a product is available, do not say it is unavailable unless explicitly corrected. Use the provided product context and conversation history.`;
+    // Initialize or update pending order
+    if (!session.pendingOrder) {
+      session.pendingOrder = {
+        items: foundProducts.map(product => {
+          const requestedItem = extracted.items.find(
+            (item: any) =>
+              product.name.toLowerCase().includes((item.english_name || item.name).toLowerCase()) ||
+              (item.sku && product.sku === item.sku)
+          );
+          return {
+            name: product.name,
+            sku: product.sku,
+            qty: requestedItem?.qty || 1, // Default to 1 if quantity not specified
+            price: Number(product.price)
+          };
+        }),
+        step: 'collecting_info'
+      };
+    } else {
+      // Add new items to existing order
+      session.pendingOrder.items.push(
+        ...foundProducts.map(product => {
+          const requestedItem = extracted.items.find(
+            (item: any) =>
+              product.name.toLowerCase().includes((item.english_name || item.name).toLowerCase()) ||
+              (item.sku && product.sku === item.sku)
+          );
+          return {
+            name: product.name,
+            sku: product.sku,
+            qty: requestedItem?.qty || 1,
+            price: Number(product.price)
+          };
+        })
+      );
+    }
+
+    session.lastProducts = foundProducts;
+    this.userSessions.set(userId, session);
+
+    if (foundProducts.length === 0) {
+      const message = session.locale === 'en'
+        ? 'Sorry, I couldn\'t find any matching products. Could you please specify the exact product names or SKUs?'
+        : 'Извините, я не смог найти подходящие товары. Можете уточнить точные названия или артикулы?';
+      await ctx.reply(message);
+      return;
+    }
+
+    // Show found products and ask for confirmation
+    await this.showProductsAndCollectInfo(ctx, session, foundProducts, extracted.items, originalText);
+  }
+
+  private async handleProductInquiry(ctx: any, session: UserSession, extracted: any, originalText: string) {
+    let productNames: string[] = [];
+    
+    if (extracted.products?.length) {
+      productNames = extracted.products.map(p => p.english_name || p.name);
+    } else {
+      // Fallback to last mentioned products
+      productNames = session.lastProducts.map(p => p.name);
+    }
+
+    const foundProducts: Product[] = [];
+    for (const name of productNames) {
+      const matches = await this.productService.findByName(name);
+      foundProducts.push(...matches);
+    }
+
+    session.lastProducts = foundProducts;
+    this.userSessions.set(ctx.from.id, session);
+
+    if (foundProducts.length === 0) {
+      const message = session.locale === 'en'
+        ? 'Sorry, I couldn\'t find information about those products. Could you please specify the exact product names?'
+        : 'Извините, я не смог найти информацию о этих товарах. Можете уточнить точные названия?';
+      await ctx.reply(message);
+      return;
+    }
+
+    // Show product information
+    await this.showProductInfo(ctx, session, foundProducts);
+  }
+
+  private async handleGeneralMessage(ctx: any, session: UserSession, extracted: any, originalText: string) {
+    const userId = ctx.from.id;
+
+    // If user has a pending order, try to collect missing information
+    if (session.pendingOrder && session.pendingOrder.step === 'collecting_info') {
+      await this.collectOrderInformation(ctx, session, originalText);
+      return;
+    }
+
+    // Otherwise, handle as general conversation
+    const productContext = this.buildProductContext(session.lastProducts);
+    
+    const contextMessages = [
+      ...session.messages,
+      productContext ? { role: 'system', content: productContext } : null,
+    ].filter(Boolean);
+
     const aiReply = await this.conversation.reply(
-      [
-        { role: 'system', content: systemPrompt },
-        ...history,
-        { role: 'system', content: productContext },
-      ].filter(Boolean) as any,
-      hints
+      contextMessages as any,
+      { locale: session.locale }
     );
 
-    // Step 7: Send reply and update history
     await ctx.reply(aiReply);
-    history.push({ role: 'assistant', content: aiReply });
-    this.userHistories.set(userId, { messages: history, lastProducts: foundProducts });
+    session.messages.push({ role: 'assistant', content: aiReply });
+    this.userSessions.set(userId, session);
+  }
+
+  private async showProductsAndCollectInfo(
+    ctx: any, 
+    session: UserSession, 
+    products: Product[], 
+    requestedItems: any[], 
+    originalText: string
+  ) {
+    const locale = session.locale;
+    
+    // Show products found
+    let message = locale === 'en' 
+      ? '🛒 <b>Products found:</b>\n\n'
+      : '🛒 <b>Найденные товары:</b>\n\n';
+
+    let totalAmount = 0;
+    const validItems: Array<{ name: string; sku: string; qty: number; price: number }> = [];
+
+    for (const item of requestedItems) {
+      const product = products.find(p => 
+        p.name.toLowerCase().includes(item.name.toLowerCase()) ||
+        (item.english_name && p.name.toLowerCase().includes(item.english_name.toLowerCase()))
+      );
+
+      if (product) {
+        const itemTotal = Number(product.price) * item.qty;
+        totalAmount += itemTotal;
+        validItems.push({
+          name: product.name,
+          sku: product.sku,
+          qty: item.qty,
+          price: Number(product.price)
+        });
+
+        message += `• <b>${product.name}</b>\n`;
+        message += `  Артикул: <code>${product.sku}</code>\n`;
+        message += `  Цена: ${product.price}₸\n`;
+        message += `  Количество: ${item.qty}\n`;
+        message += `  Сумма: ${itemTotal}₸\n`;
+        
+        if (product.qty < item.qty) {
+          message += `  ⚠️ В наличии: ${product.qty} шт.\n`;
+        }
+        message += '\n';
+      }
+    }
+
+    message += `💰 <b>${locale === 'en' ? 'Total' : 'Итого'}: ${totalAmount}₸</b>\n\n`;
+
+    // Update pending order with valid items
+    session.pendingOrder!.items = validItems;
+
+    // Check what information is missing
+    const missing = this.getMissingOrderInfo(session.pendingOrder!);
+    
+    if (missing.length > 0) {
+      message += locale === 'en' 
+        ? `To complete your order, please provide:\n${missing.map(m => `• ${m}`).join('\n')}`
+        : `Для завершения заказа укажите:\n${missing.map(m => `• ${m}`).join('\n')}`;
+    } else {
+      message += locale === 'en'
+        ? 'All information collected! Please confirm your order.'
+        : 'Вся информация собрана! Пожалуйста, подтвердите заказ.';
+      session.pendingOrder!.step = 'confirming';
+    }
+
+    await ctx.reply(message, { parse_mode: 'HTML' });
+    
+    if (session.pendingOrder!.step === 'confirming') {
+      await this.showOrderConfirmation(ctx, session, originalText);
+    }
+
+    this.userSessions.set(ctx.from.id, session);
+  }
+
+  private async collectOrderInformation(ctx: any, session: UserSession, text: string) {
+    const pendingOrder = session.pendingOrder!;
+    const locale = session.locale;
+
+    // Try to extract phone number
+    const phoneMatch = text.match(/(\+7|8|7)[\s\-]?(\d{3})[\s\-]?(\d{3})[\s\-]?(\d{2})[\s\-]?(\d{2})/);
+    if (phoneMatch && !pendingOrder.customerPhone) {
+      pendingOrder.customerPhone = phoneMatch[0].replace(/[\s\-]/g, '');
+      if (!pendingOrder.customerPhone.startsWith('+7')) {
+        pendingOrder.customerPhone = '+7' + pendingOrder.customerPhone.substring(1);
+      }
+    }
+
+    // Try to extract email
+    const emailMatch = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+    if (emailMatch && !pendingOrder.customerEmail) {
+      pendingOrder.customerEmail = emailMatch[0];
+    }
+
+    // Try to extract name (simple heuristic)
+    if (!pendingOrder.customerName && !phoneMatch && !emailMatch) {
+      // If the message doesn't contain phone or email, assume it's a name
+      const words = text.trim().split(/\s+/);
+      if (words.length >= 1 && words.length <= 3) {
+        // Looks like a name
+        pendingOrder.customerName = text.trim();
+      }
+    }
+
+    const missing = this.getMissingOrderInfo(pendingOrder);
+
+    if (missing.length === 0) {
+      pendingOrder.step = 'confirming';
+      await this.showOrderConfirmation(ctx, session, text);
+    } else {
+      // Ask for next missing piece of information
+      const nextMissing = missing[0];
+      let prompt = '';
+      
+      switch (nextMissing) {
+        case locale === 'en' ? 'Phone number' : 'Номер телефона':
+          prompt = locale === 'en' 
+            ? 'Please provide your phone number (format: +7 7xx xxx xx xx):'
+            : 'Пожалуйста, укажите ваш номер телефона (формат: +7 7xx xxx xx xx):';
+          break;
+        case locale === 'en' ? 'Name' : 'Имя':
+          prompt = locale === 'en' 
+            ? 'Please provide your full name:'
+            : 'Пожалуйста, укажите ваше ФИО:';
+          break;
+        default:
+          prompt = locale === 'en'
+            ? `Please provide: ${nextMissing}`
+            : `Пожалуйста, укажите: ${nextMissing}`;
+      }
+
+      await ctx.reply(prompt);
+    }
+
+    this.userSessions.set(ctx.from.id, session);
+  }
+
+  private async showOrderConfirmation(ctx: any, session: UserSession, originalText: string) {
+    const pendingOrder = session.pendingOrder!;
+    const locale = session.locale;
+
+    const totalAmount = pendingOrder.items.reduce(
+      (sum, item) => sum + item.price * item.qty, 0
+    );
+
+    let message = locale === 'en' 
+      ? '✅ <b>Order Confirmation</b>\n\n'
+      : '✅ <b>Подтверждение заказа</b>\n\n';
+
+    message += locale === 'en' ? '<b>Items:</b>\n' : '<b>Товары:</b>\n';
+    for (const item of pendingOrder.items) {
+      message += `• ${item.name} x${item.qty} — ${item.price * item.qty}₸\n`;
+    }
+
+    message += `\n💰 <b>${locale === 'en' ? 'Total' : 'Итого'}: ${totalAmount}₸</b>\n\n`;
+
+    message += locale === 'en' ? '<b>Customer info:</b>\n' : '<b>Информация о клиенте:</b>\n';
+    if (pendingOrder.customerName) message += `${locale === 'en' ? 'Name' : 'Имя'}: ${pendingOrder.customerName}\n`;
+    if (pendingOrder.customerPhone) message += `${locale === 'en' ? 'Phone' : 'Телефон'}: ${pendingOrder.customerPhone}\n`;
+    if (pendingOrder.customerEmail) message += `Email: ${pendingOrder.customerEmail}\n`;
+
+    message += locale === 'en' 
+      ? '\nConfirm order? Reply "Yes" to proceed or "No" to cancel.'
+      : '\nПодтвердить заказ? Ответьте "Да" для продолжения или "Нет" для отмены.';
+
+    await ctx.reply(message, { parse_mode: 'HTML' });
+
+    // Set up confirmation handler
+    pendingOrder.step = 'ready';
+    this.userSessions.set(ctx.from.id, session);
+  }
+
+  private async showProductInfo(ctx: any, session: UserSession, products: Product[]) {
+    const locale = session.locale;
+    
+    let message = locale === 'en' 
+      ? '📦 <b>Product Information:</b>\n\n'
+      : '📦 <b>Информация о товарах:</b>\n\n';
+
+    for (const product of products) {
+      message += `<b>${product.name}</b>\n`;
+      message += `${locale === 'en' ? 'SKU' : 'Артикул'}: <code>${product.sku}</code>\n`;
+      message += `${locale === 'en' ? 'Price' : 'Цена'}: ${product.price}₸\n`;
+      message += `${locale === 'en' ? 'In stock' : 'В наличии'}: ${product.qty} ${locale === 'en' ? 'pcs' : 'шт'}\n`;
+      if (product.url) {
+        message += `${locale === 'en' ? 'More info' : 'Подробнее'}: ${product.url}\n`;
+      }
+      message += '\n';
+    }
+
+    message += locale === 'en'
+      ? 'Would you like to order any of these products?'
+      : 'Хотите заказать какие-либо из этих товаров?';
+
+    await ctx.reply(message, { parse_mode: 'HTML' });
+  }
+
+  private async handleOrderStatusCheck(ctx: any, orderNumber: string) {
+    try {
+      const order = await this.orderService.findOrderByNumber(orderNumber.toUpperCase());
+      
+      if (!order) {
+        const userId = ctx.from.id;
+        const session = this.userSessions.get(userId);
+        const locale = session?.locale || 'ru';
+        
+        const message = locale === 'en'
+          ? `Order ${orderNumber} not found. Please check the order number and try again.`
+          : `Заказ ${orderNumber} не найден. Проверьте номер заказа и попробуйте еще раз.`;
+        
+        await ctx.reply(message);
+        return;
+      }
+
+      const locale = order.customer.locale || 'ru';
+      const statusText = this.getStatusText(order.status, locale);
+      
+      let message = `📋 <b>${locale === 'en' ? 'Order Status' : 'Статус заказа'}</b>\n\n`;
+      message += `${locale === 'en' ? 'Order' : 'Заказ'}: <code>${order.number}</code>\n`;
+      message += `${locale === 'en' ? 'Status' : 'Статус'}: ${statusText}\n`;
+      message += `${locale === 'en' ? 'Total' : 'Сумма'}: ${order.totalAmount}₸\n`;
+      message += `${locale === 'en' ? 'Created' : 'Создан'}: ${order.createdAt.toLocaleString('ru-RU', { timeZone: 'Asia/Almaty' })}\n\n`;
+
+      message += `<b>${locale === 'en' ? 'Items' : 'Товары'}:</b>\n`;
+      for (const item of order.items) {
+        message += `• ${item.name} x${item.qty} — ${item.amount}₸\n`;
+      }
+
+      await ctx.reply(message, { parse_mode: 'HTML' });
+    } catch (error) {
+      console.error('❌ Error checking order status:', error);
+      await ctx.reply(
+        'Произошла ошибка при проверке статуса заказа. Попробуйте позже.'
+      );
+    }
+  }
+
+  private getMissingOrderInfo(order: UserSession['pendingOrder']): string[] {
+    const missing: string[] = [];
+    
+    if (!order!.customerPhone) {
+      missing.push('Номер телефона');
+    }
+    
+    // Name is optional but recommended
+    // if (!order!.customerName) {
+    //   missing.push('Имя');
+    // }
+
+    return missing;
+  }
+
+  private buildProductContext(products: Product[]): string {
+    if (products.length === 0) return '';
+    
+    return 'Available products:\n' + products
+      .map(p => `${p.name} — ${p.price}₸ (SKU: ${p.sku})${p.url ? ` — ${p.url}` : ''}`)
+      .join('\n');
+  }
+
+  private isOrderNumberQuery(text: string): boolean {
+    return /KG-\d{4}-\d{6}/i.test(text);
+  }
+
+  private getStatusText(status: string, locale: string): string {
+    const statusMap = {
+      'NEW': locale === 'en' ? '🟡 New' : '🟡 Новый',
+      'PENDING': locale === 'en' ? '🟠 Pending' : '🟠 В обработке',
+      'CONFIRMED': locale === 'en' ? '🟢 Confirmed' : '🟢 Подтвержден',
+      'PAID': locale === 'en' ? '💚 Paid' : '💚 Оплачен',
+      'SHIPPED': locale === 'en' ? '🚚 Shipped' : '🚚 Отправлен',
+      'CLOSED': locale === 'en' ? '✅ Closed' : '✅ Завершен',
+      'CANCELLED': locale === 'en' ? '❌ Cancelled' : '❌ Отменен'
+    };
+
+    return statusMap[status] || status;
+  }
+
+    private async handleOrderConfirmation(ctx: any, session: UserSession, text: string, originalMessage: string) {
+    const userId = ctx.from.id;
+    const locale = session.locale;
+    const isConfirmed = /^(да|yes|y|д|\+)$/i.test(text.trim());
+    const isRejected = /^(нет|no|n|н|-)$/i.test(text.trim());
+
+    if (isConfirmed) {
+      try {
+        const order = await this.orderService.createOrder({
+          customerPhone: session.pendingOrder!.customerPhone!,
+          customerName: session.pendingOrder!.customerName,
+          customerEmail: session.pendingOrder!.customerEmail,
+          tgUserId: userId.toString(),
+          items: session.pendingOrder!.items,
+          source: 'telegram',
+          originalMessage: originalMessage,
+          locale: locale
+        });
+
+        const message = locale === 'en'
+          ? `✅ <b>Order created successfully!</b>\n\nOrder number: <code>${order.number}</code>\nTotal: ${order.totalAmount}₸\n\nOur manager will contact you shortly to confirm delivery details and payment.\n\nThank you for your order! 🙏`
+          : `✅ <b>Заказ успешно создан!</b>\n\nНомер заказа: <code>${order.number}</code>\nСумма: ${order.totalAmount}₸\n\nНаш менеджер свяжется с вами в ближайшее время для уточнения деталей доставки и оплаты.\n\nСпасибо за заказ! 🙏`;
+
+        await ctx.reply(message, { parse_mode: 'HTML' });
+
+        // Clear pending order
+        session.pendingOrder = undefined;
+        session.messages = []; // Reset conversation
+        this.userSessions.set(userId, session);
+
+      } catch (error) {
+        console.error('❌ Error creating order:', error);
+        
+        const errorMessage = locale === 'en'
+          ? 'Sorry, there was an error creating your order. Please try again or contact our support.'
+          : 'Извините, произошла ошибка при создании заказа. Попробуйте еще раз или обратитесь в поддержку.';
+        
+        await ctx.reply(errorMessage);
+        throw error; // Re-throw for debugging purposes
+      }
+    } else if (isRejected) {
+      session.pendingOrder = undefined;
+      this.userSessions.set(userId, session);
+      
+      const message = locale === 'en'
+        ? '❌ Order cancelled. How can I help you?'
+        : '❌ Заказ отменен. Чем могу помочь?';
+      
+      await ctx.reply(message);
+    } else {
+      const message = locale === 'en'
+        ? 'Please reply "Yes" to confirm or "No" to cancel the order.'
+        : 'Пожалуйста, ответьте "Да" для подтверждения или "Нет" для отмены заказа.';
+      
+      await ctx.reply(message);
+    }
   }
 }

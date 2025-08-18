@@ -42,6 +42,20 @@ model Product {
   orderItems OrderItem[]
 }
 
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  role      String   @default("manager") // 'admin', 'manager', 'viewer'
+  tgUserId  String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  
+  // Relations
+  managedOrders Order[]    @relation("OrderManager")
+  activities    Activity[]
+}
+
 model Order {
   id          String      @id @default(cuid())
   number      String      @unique
@@ -53,8 +67,18 @@ model Order {
   source      String
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
+  
+  // Manager fields
+  manager      User?     @relation("OrderManager", fields: [managerId], references: [id])
+  managerId    String?
+  managerNotes String?
+  confirmedAt  DateTime?
+  rejectedAt   DateTime?
+  
+  // Relations
   items       OrderItem[]
-  message     Message[]
+  messages    Message[]
+  activities  Activity[]
 }
 
 model OrderItem {
@@ -92,4 +116,28 @@ model Extraction {
   confidence Float
   payload    Json
   createdAt  DateTime @default(now())
+}
+
+model Activity {
+  id        String   @id @default(cuid())
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId   String
+  actorType String   // 'customer', 'manager', 'system'
+  actorId   String   // userId, customerId, or 'system'
+  action    String   // 'created', 'confirmed', 'rejected', etc.
+  payload   Json?
+  createdAt DateTime @default(now())
+  
+  // Optional relation to user (for manager actions)
+  actor     User?    @relation(fields: [actorId], references: [id])
+}
+
+model WebhookOutbox {
+  id        String   @id @default(cuid())
+  kind      String   // 'manager_notification', 'customer_notification'
+  payload   Json
+  status    String   @default("pending") // 'pending', 'sent', 'failed'
+  attempts  Int      @default(0)
+  nextRunAt DateTime @default(now())
+  createdAt DateTime @default(now())
 }
