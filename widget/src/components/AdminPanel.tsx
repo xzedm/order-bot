@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Search, Filter, Download, Eye, Edit, Trash2, Plus, 
   Users, Package, MessageSquare, BarChart3, Settings,
@@ -13,34 +13,42 @@ interface StatusConfig {
   [key: string]: { label: string; color: string };
 }
 
-interface Customer {
-  id: number;
+interface OrderCustomer {
+  id: string;
   name: string;
   phone: string;
   email: string | null;
-  orders?: number;
-  totalSpent?: number;
-  lastOrder?: Date;
 }
 
-interface Item {
+interface Customer {
+  id: string;
+  name: string;
+  phone: string;
+  email: string | null;
+  orders: number;
+  totalSpent: number;
+  lastOrder: Date | null;
+  createdAt: Date;
+}
+
+interface OrderItem {
   name: string;
   qty: number;
   price: number;
-  sku: string;
+  sku?: string;
 }
 
 interface Order {
-  id: number;
+  id: string;
   number: string;
   status: Status;
-  customer: Customer;
+  customer: OrderCustomer;
   total: number;
   currency: string;
-  items: Item[];
+  items: OrderItem[];
   channel: string;
   createdAt: Date;
-  managerId: number | null;
+  managerId: string | null;
 }
 
 interface Filters {
@@ -50,13 +58,26 @@ interface Filters {
   search: string;
 }
 
+interface Analytics {
+  totalOrders: number;
+  totalRevenue: number;
+  customerCount: number;
+  averageOrder: number;
+  statusCounts: Record<string, number>;
+}
+
 // Mock Data
 const mockOrders: Order[] = [
   {
-    id: 1,
+    id: '1',
     number: 'KG-2025-000123',
     status: 'new',
-    customer: { id: 1, name: 'Иван Петров', phone: '+7 701 123 45 67', email: 'ivan@example.com' },
+    customer: { 
+      id: '1', 
+      name: 'Иван Петров', 
+      phone: '+7 777 123 45 67', 
+      email: 'ivan@example.com' 
+    } as OrderCustomer,
     total: 45000,
     currency: '₸',
     items: [
@@ -68,10 +89,15 @@ const mockOrders: Order[] = [
     managerId: null
   },
   {
-    id: 2,
+    id: '2',
     number: 'KG-2025-000124',
     status: 'confirmed',
-    customer: { id: 2, name: 'Анна Смирнова', phone: '+7 702 987 65 43', email: 'anna@example.com' },
+    customer: { 
+      id: '2', 
+      name: 'Мария Сидорова', 
+      phone: '+7 777 234 56 78', 
+      email: 'maria@example.com' 
+    } as OrderCustomer,
     total: 25500,
     currency: '₸',
     items: [
@@ -79,13 +105,18 @@ const mockOrders: Order[] = [
     ],
     channel: 'web',
     createdAt: new Date('2025-01-09T14:20:00'),
-    managerId: 1
+    managerId: '1'
   },
   {
-    id: 3,
+    id: '3',
     number: 'KG-2025-000125',
     status: 'paid',
-    customer: { id: 3, name: 'Сергей Козлов', phone: '+7 705 456 78 90', email: null },
+    customer: { 
+      id: '3', 
+      name: 'Алексей Козлов', 
+      phone: '+7 777 345 67 89', 
+      email: null 
+    } as OrderCustomer,
     total: 12000,
     currency: '₸',
     items: [
@@ -93,28 +124,40 @@ const mockOrders: Order[] = [
     ],
     channel: 'telegram',
     createdAt: new Date('2025-01-08T09:15:00'),
-    managerId: 1
+    managerId: '1'
   }
 ];
 
 const mockCustomers: Customer[] = [
   {
-    id: 1,
+    id: '1',
     name: 'Иван Петров',
-    phone: '+7 701 123 45 67',
+    phone: '+7 777 123 45 67',
     email: 'ivan@example.com',
     orders: 3,
-    totalSpent: 75000,
-    lastOrder: new Date('2025-01-10T10:30:00')
+    totalSpent: 45000,
+    lastOrder: new Date('2024-01-15'),
+    createdAt: new Date('2024-01-01')
   },
   {
-    id: 2,
-    name: 'Анна Смирнова',
-    phone: '+7 702 987 65 43',
-    email: 'anna@example.com',
+    id: '2',
+    name: 'Мария Сидорова',
+    phone: '+7 777 234 56 78',
+    email: 'maria@example.com',
+    orders: 2,
+    totalSpent: 32000,
+    lastOrder: new Date('2024-01-14'),
+    createdAt: new Date('2024-01-02')
+  },
+  {
+    id: '3',
+    name: 'Алексей Козлов',
+    phone: '+7 777 345 67 89',
+    email: null,
     orders: 1,
-    totalSpent: 25500,
-    lastOrder: new Date('2025-01-09T14:20:00')
+    totalSpent: 15000,
+    lastOrder: new Date('2024-01-13'),
+    createdAt: new Date('2024-01-03')
   }
 ];
 
@@ -130,13 +173,130 @@ const statusConfig: StatusConfig = {
 
 const AdminPanel = () => {
   const [activeTab, setActiveTab] = useState<'orders' | 'customers' | 'analytics'>('orders');
-  const [orders, setOrders] = useState<Order[]>(mockOrders);
-  const [customers, setCustomers] = useState<Customer[]>(mockCustomers);
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [showOrderModal, setShowOrderModal] = useState(false);
   const [filters, setFilters] = useState<Filters>({ status: 'all', dateFrom: '', dateTo: '', search: '' });
+  const [loading, setLoading] = useState(false);
 
-  // Filter orders based on current filters
+  const mapApiOrderToUI = (o: any): Order => {
+    const statusLower = (o.status || '').toString().toLowerCase() as Status;
+    const currency = o.currency === 'KZT' ? '₸' : (o.currency || '₸');
+    const created = o.createdAt ? new Date(o.createdAt) : (o.created_at ? new Date(o.created_at) : new Date());
+    return {
+      id: o.id,
+      number: o.number,
+      status: statusLower,
+      customer: {
+        id: o.customer?.id || o.customerId || o.customer_id || '',
+        name: o.customer?.name || '',
+        phone: o.customer?.phone || '',
+        email: o.customer?.email || null,
+      } as OrderCustomer,
+      total: Number(o.totalAmount ?? o.total_amount ?? 0),
+      currency,
+      items: (o.items || []).map((it: any) => ({ name: it.name, qty: Number(it.qty), price: Number(it.price), sku: it.sku })),
+      channel: o.source || o.channel || 'web',
+      createdAt: created,
+      managerId: o.manager_id || null,
+    };
+  };
+
+  const fetchOrders = async () => {
+    try {
+      setLoading(true);
+      const params = new URLSearchParams();
+      if (filters.status !== 'all') params.set('status', filters.status);
+      if (filters.search) params.set('q', filters.search);
+      if (filters.dateFrom) params.set('dateFrom', filters.dateFrom);
+      if (filters.dateTo) params.set('dateTo', filters.dateTo);
+      const res = await fetch(`/api/orders?${params.toString()}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || 'Failed to load orders');
+      const mapped: Order[] = data.map(mapApiOrderToUI);
+      setOrders(mapped);
+    } catch (e) {
+      console.error('Failed to fetch orders', e);
+      // Fallback to mock data for demo
+      setOrders(mockOrders);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchCustomers = async () => {
+    try {
+      const res = await fetch('/api/orders/customers');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || 'Failed to load customers');
+      
+      // Map customer data and ensure proper date handling
+      const mappedCustomers = data.map((customer: any) => ({
+        ...customer,
+        lastOrder: customer.lastOrder ? new Date(customer.lastOrder) : null,
+        createdAt: customer.createdAt ? new Date(customer.createdAt) : new Date(customer.created_at || Date.now())
+      }));
+      
+      setCustomers(mappedCustomers);
+    } catch (e) {
+      console.error('Failed to fetch customers', e);
+      // Fallback to mock data for demo
+      setCustomers(mockCustomers);
+    }
+  };
+
+  const fetchAnalytics = async () => {
+    try {
+      const res = await fetch('/api/orders/analytics');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || 'Failed to load analytics');
+      
+      // Ensure proper data types
+      const mappedAnalytics: Analytics = {
+        totalOrders: Number(data.totalOrders) || 0,
+        totalRevenue: Number(data.totalRevenue) || 0,
+        customerCount: Number(data.customerCount) || 0,
+        averageOrder: Number(data.averageOrder) || 0,
+        statusCounts: data.statusCounts || {}
+      };
+      
+      setAnalytics(mappedAnalytics);
+    } catch (e) {
+      console.error('Failed to fetch analytics', e);
+      // Fallback to calculated analytics from orders
+      const successfulOrders = orders.filter(o => o.status !== 'cancelled');
+      const totalRevenue = successfulOrders.reduce((sum, order) => sum + order.total, 0);
+      setAnalytics({
+        totalOrders: successfulOrders.length,
+        totalRevenue,
+        customerCount: customers.length,
+        averageOrder: successfulOrders.length > 0 ? totalRevenue / successfulOrders.length : 0,
+        statusCounts: orders.reduce((acc: Record<string, number>, order) => {
+          acc[order.status] = (acc[order.status] || 0) + 1;
+          return acc;
+        }, {
+          new: 0, pending: 0, confirmed: 0, paid: 0, shipped: 0, closed: 0, cancelled: 0,
+        })
+      });
+    }
+  };
+
+  useEffect(() => {
+    fetchOrders();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters.status, filters.search, filters.dateFrom, filters.dateTo]);
+
+  useEffect(() => {
+    if (activeTab === 'customers') {
+      fetchCustomers();
+    } else if (activeTab === 'analytics') {
+      fetchAnalytics();
+    }
+  }, [activeTab]);
+
+  // Filter orders based on current filters (client-side extra)
   const filteredOrders = orders.filter(order => {
     if (filters.status !== 'all' && order.status !== filters.status) return false;
     if (filters.search && !order.number.toLowerCase().includes(filters.search.toLowerCase()) 
@@ -146,31 +306,44 @@ const AdminPanel = () => {
     return true;
   });
 
-  const updateOrderStatus = (orderId: number, newStatus: Status) => {
+  const updateOrderStatus = async (orderId: string, newStatus: Status) => {
+    try {
+      const res = await fetch(`/api/orders/${orderId}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus.toUpperCase() }) as any,
+      } as any);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.message || 'Failed to update status');
+      }
     setOrders(prev => prev.map(order => 
       order.id === orderId ? { ...order, status: newStatus } : order
     ));
+      // Refresh analytics after status change
+      if (activeTab === 'analytics') {
+        fetchAnalytics();
+      }
+    } catch (e) {
+      console.error('Failed to update order status', e);
+      alert('Не удалось обновить статус заказа');
+    }
   };
 
-  const exportOrders = () => {
-    const csvContent = [
-      ['Номер заказа', 'Статус', 'Клиент', 'Телефон', 'Сумма', 'Канал', 'Дата создания'].join(','),
-      ...filteredOrders.map(order => [
-        order.number,
-        statusConfig[order.status].label,
-        order.customer.name,
-        order.customer.phone,
-        order.total,
-        order.channel,
-        order.createdAt.toLocaleDateString('ru-RU')
-      ].join(','))
-    ].join('\n');
-
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `orders_${new Date().toISOString().split('T')[0]}.csv`;
-    link.click();
+  const openOrderModal = async (order: Order) => {
+    try {
+      const res = await fetch(`/api/orders/${order.number}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || 'Failed to load order');
+      const full = mapApiOrderToUI(data);
+      setSelectedOrder(full);
+      setShowOrderModal(true);
+    } catch (e) {
+      console.error('Failed to load order', e);
+      // Fallback show minimal info
+      setSelectedOrder(order);
+      setShowOrderModal(true);
+    }
   };
 
   const OrderModal = () => {
@@ -197,9 +370,9 @@ const AdminPanel = () => {
                 <label className="block text-sm font-medium mb-2">Статус</label>
                 <select
                   value={selectedOrder.status}
-                  onChange={(e) => {
+                  onChange={async (e) => {
                     const newStatus = e.target.value as Status;
-                    updateOrderStatus(selectedOrder.id, newStatus);
+                    await updateOrderStatus(selectedOrder.id, newStatus);
                     setSelectedOrder(prev => prev ? ({ ...prev, status: newStatus }) : null);
                   }}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2"
@@ -246,7 +419,7 @@ const AdminPanel = () => {
             <div>
               <h3 className="font-semibold mb-3">Товары</h3>
               <div className="space-y-3">
-                {selectedOrder.items.map((item: Item, index: number) => (
+                {selectedOrder.items.map((item: OrderItem, index: number) => (
                   <div key={index} className="border border-gray-200 rounded-lg p-3">
                     <div className="flex justify-between items-start">
                       <div className="flex-1">
@@ -329,7 +502,7 @@ const AdminPanel = () => {
           />
 
           <button
-            onClick={exportOrders}
+            onClick={fetchOrders}
             className="flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700"
           >
             <Download size={16} />
@@ -379,10 +552,7 @@ const AdminPanel = () => {
                   <td className="px-4 py-3">
                     <div className="flex gap-2">
                       <button
-                        onClick={() => {
-                          setSelectedOrder(order);
-                          setShowOrderModal(true);
-                        }}
+                        onClick={() => openOrderModal(order)}
                         className="text-blue-600 hover:text-blue-800"
                         title="Просмотр"
                       >
@@ -410,6 +580,11 @@ const AdminPanel = () => {
 
   const CustomersTab = () => (
     <div className="space-y-6">
+      {customers.length === 0 ? (
+        <div className="bg-white rounded-lg border border-gray-200 p-8 text-center">
+          <div className="text-gray-500">Загрузка клиентов...</div>
+        </div>
+      ) : (
       <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full">
@@ -444,7 +619,7 @@ const AdminPanel = () => {
                   <td className="px-4 py-3 text-center">{customer.orders}</td>
                   <td className="px-4 py-3 font-semibold">{customer.totalSpent?.toLocaleString()} ₸</td>
                   <td className="px-4 py-3 text-sm">
-                    {customer.lastOrder?.toLocaleDateString('ru-RU')}
+                    {customer.lastOrder ? new Date(customer.lastOrder).toLocaleDateString('ru-RU') : 'Нет заказов'}
                   </td>
                   <td className="px-4 py-3">
                     <button className="text-blue-600 hover:text-blue-800" title="Просмотр заказов">
@@ -457,24 +632,24 @@ const AdminPanel = () => {
           </table>
         </div>
       </div>
+      )}
     </div>
   );
 
   const AnalyticsTab = () => {
-    const totalOrders = orders.length;
-    const totalRevenue = orders.reduce((sum, order) => sum + order.total, 0);
-    const statusCounts = orders.reduce((acc: Record<Status, number>, order) => {
-      acc[order.status] = (acc[order.status] || 0) + 1;
-      return acc;
-    }, {
-      new: 0,
-      pending: 0,
-      confirmed: 0,
-      paid: 0,
-      shipped: 0,
-      closed: 0,
-      cancelled: 0,
-    });
+    if (!analytics) {
+      return (
+        <div className="space-y-6">
+          <div className="bg-white rounded-lg border border-gray-200 p-8 text-center">
+            <div className="text-gray-500">Загрузка аналитики...</div>
+          </div>
+        </div>
+      );
+    }
+
+    const totalOrders = analytics.totalOrders;
+    const totalRevenue = analytics.totalRevenue;
+    const statusCounts = analytics.statusCounts;
 
     return (
       <div className="space-y-6">
@@ -486,7 +661,7 @@ const AdminPanel = () => {
               </div>
               <div>
                 <div className="text-2xl font-bold">{totalOrders}</div>
-                <div className="text-sm text-gray-600">Всего заказов</div>
+                <div className="text-sm text-gray-600">Успешных заказов</div>
               </div>
             </div>
           </div>
@@ -509,7 +684,7 @@ const AdminPanel = () => {
                 <Users className="text-purple-600" size={20} />
               </div>
               <div>
-                <div className="text-2xl font-bold">{customers.length}</div>
+                <div className="text-2xl font-bold">{analytics.customerCount}</div>
                 <div className="text-sm text-gray-600">Клиентов</div>
               </div>
             </div>
@@ -521,7 +696,7 @@ const AdminPanel = () => {
                 <Clock className="text-orange-600" size={20} />
               </div>
               <div>
-                <div className="text-2xl font-bold">{Math.round(totalRevenue / totalOrders).toLocaleString()} ₸</div>
+                <div className="text-2xl font-bold">{Math.round(analytics.averageOrder).toLocaleString()} ₸</div>
                 <div className="text-sm text-gray-600">Средний чек</div>
               </div>
             </div>
@@ -534,18 +709,18 @@ const AdminPanel = () => {
             {Object.entries(statusCounts).map(([status, count]) => (
               <div key={status} className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${statusConfig[status as Status].color}`}>
-                    {statusConfig[status as Status].label}
+                  <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${statusConfig[status as Status]?.color || 'bg-gray-100 text-gray-800'}`}>
+                    {statusConfig[status as Status]?.label || status}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
                   <div className="w-24 bg-gray-200 rounded-full h-2">
                     <div 
                       className="bg-blue-600 h-2 rounded-full" 
-                      style={{ width: `${(count / totalOrders) * 100}%` }}
+                      style={{ width: `${(count / (totalOrders || 1)) * 100}%` }}
                     ></div>
                   </div>
-                  <span className="text-sm font-medium w-8 text-right">{count}</span>
+                  <span className="text-sm font-medium w-8 text-right">{count as number}</span>
                 </div>
               </div>
             ))}

@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import { ExtractionService } from '../extraction/extraction.service';
 import { ConversationService } from '../ai/conversation.service';
 import { ProductService, Product } from '../products/product.service';
-import { PrismaService } from '../prisma/prisma.service';
 
 interface ChatResult {
   reply: string;
@@ -18,7 +17,6 @@ export class ChatService {
     private readonly extraction: ExtractionService,
     private readonly conversation: ConversationService,
     private readonly productService: ProductService,
-    private readonly prisma: PrismaService
   ) {}
 
   async processMessage(dto: any): Promise<ChatResult> {

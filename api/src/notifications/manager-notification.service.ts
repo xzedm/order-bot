@@ -2,7 +2,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectBot } from 'nestjs-telegraf';
 import { Telegraf } from 'telegraf';
-import { PrismaService } from '../prisma/prisma.service';
+import { supabase } from '../config/supabase';
 
 export interface OrderNotificationData {
   customerName?: string;
@@ -27,7 +27,6 @@ export class ManagerNotificationService {
 
   constructor(
     @InjectBot() private bot: Telegraf,
-    private prisma: PrismaService,
   ) {
     this.managerChannelId = process.env.TELEGRAM_MANAGER_CHANNEL_ID!;
     if (!this.managerChannelId) {
@@ -108,10 +107,10 @@ ${itemsList}
     try {
       switch (action) {
         case 'confirm_order':
-          await this.confirmOrder(orderId, callbackQuery.from.id);
+          await this.confirmOrder(orderId, callbackQuery.from.id, callbackQuery.id);
           break;
         case 'reject_order':
-          await this.rejectOrder(orderId, callbackQuery.from.id);
+          await this.rejectOrder(orderId, callbackQuery.from.id, callbackQuery.id);
           break;
         case 'contact_customer':
           await this.handleContactCustomer(orderId, callbackQuery);
@@ -129,27 +128,30 @@ ${itemsList}
     }
   }
 
-  private async confirmOrder(orderId: string, managerId: number): Promise<void> {
-    // Update order status to CONFIRMED
-    const order = await this.prisma.order.update({
-      where: { id: orderId },
-      data: { 
-        status: 'CONFIRMED',
-        // TODO: Add managerId field to Order model
-      },
-      include: { 
-        customer: true,
-        items: { include: { product: true } }
-      }
-    });
+  private async confirmOrder(orderId: string, managerId: number, cbId?: string): Promise<void> {
+    const { data: updated, error: updateError } = await supabase
+      .from('orders')
+      .update({ status: 'CONFIRMED' })
+      .eq('id', orderId)
+      .select('*')
+      .maybeSingle();
 
-    // Send confirmation to customer via bot
-    if (order.customer.tgUserId) {
+    if (updateError || !updated) {
+      console.error('❌ Failed to update order:', updateError || 'No row updated (RLS or not found)', { orderId });
+      if (cbId) {
+        await this.bot.telegram.answerCbQuery(cbId, 'Не удалось обновить заказ (нет доступа или не найден)');
+      }
+      return;
+    }
+
+    const order = await this.fetchOrder(orderId);
+
+    if (order?.customer?.tg_user_id) {
       const message = `
 ✅ <b>Заказ подтвержден!</b>
 
 📝 Номер заказа: <code>${order.number}</code>
-💰 Сумма: ${order.totalAmount} ${order.currency}
+💰 Сумма: ${order.total_amount} ${order.currency}
 
 Наш менеджер свяжется с вами в ближайшее время для уточнения деталей доставки и оплаты.
 
@@ -158,7 +160,7 @@ ${itemsList}
 
       try {
         await this.bot.telegram.sendMessage(
-          order.customer.tgUserId,
+          order.customer.tg_user_id,
           message,
           { parse_mode: 'HTML' }
         );
@@ -167,18 +169,32 @@ ${itemsList}
       }
     }
 
-    console.log(`✅ Order ${order.number} confirmed by manager ${managerId}`);
+    if (cbId) {
+      await this.bot.telegram.answerCbQuery(cbId, 'Заказ подтвержден');
+    }
+
+    console.log(`✅ Order ${order?.number} confirmed by manager ${managerId}`);
   }
 
-  private async rejectOrder(orderId: string, managerId: number): Promise<void> {
-    const order = await this.prisma.order.update({
-      where: { id: orderId },
-      data: { status: 'CANCELLED' },
-      include: { customer: true }
-    });
+  private async rejectOrder(orderId: string, managerId: number, cbId?: string): Promise<void> {
+    const { data: updated, error: updateError } = await supabase
+      .from('orders')
+      .update({ status: 'CANCELLED' })
+      .eq('id', orderId)
+      .select('*')
+      .maybeSingle();
 
-    // Send rejection notice to customer
-    if (order.customer.tgUserId) {
+    if (updateError || !updated) {
+      console.error('❌ Failed to update order:', updateError || 'No row updated (RLS or not found)', { orderId });
+      if (cbId) {
+        await this.bot.telegram.answerCbQuery(cbId, 'Не удалось обновить заказ (нет доступа или не найден)');
+      }
+      return;
+    }
+
+    const order = await this.fetchOrder(orderId);
+
+    if (order?.customer?.tg_user_id) {
       const message = `
 ❌ <b>Заказ отклонен</b>
 
@@ -192,7 +208,7 @@ ${itemsList}
 
       try {
         await this.bot.telegram.sendMessage(
-          order.customer.tgUserId,
+          order.customer.tg_user_id,
           message,
           { parse_mode: 'HTML' }
         );
@@ -201,14 +217,15 @@ ${itemsList}
       }
     }
 
-    console.log(`❌ Order ${order.number} rejected by manager ${managerId}`);
+    if (cbId) {
+      await this.bot.telegram.answerCbQuery(cbId, 'Заказ отклонен');
+    }
+
+    console.log(`❌ Order ${order?.number} rejected by manager ${managerId}`);
   }
 
   private async handleContactCustomer(orderId: string, callbackQuery: any): Promise<void> {
-    const order = await this.prisma.order.findUnique({
-      where: { id: orderId },
-      include: { customer: true }
-    });
+    const order = await this.fetchOrder(orderId);
 
     if (!order) {
       await this.bot.telegram.answerCbQuery(
@@ -222,9 +239,9 @@ ${itemsList}
 📞 <b>Контакты клиента</b>
 
 📝 Заказ: <code>${order.number}</code>
-${order.customer.name ? `👤 Имя: ${order.customer.name}` : ''}
-📞 Телефон: <code>${order.customer.phone}</code>
-${order.customer.email ? `📧 Email: ${order.customer.email}` : ''}
+${order.customer?.name ? `👤 Имя: ${order.customer.name}` : ''}
+📞 Телефон: <code>${order.customer?.phone}</code>
+${order.customer?.email ? `📧 Email: ${order.customer.email}` : ''}
 
 Вы можете связаться с клиентом по указанным контактам.
     `.trim();
@@ -242,12 +259,50 @@ ${order.customer.email ? `📧 Email: ${order.customer.email}` : ''}
   }
 
   private async handleEditOrder(orderId: string, callbackQuery: any): Promise<void> {
-    // For now, just provide a message with instructions
-    // In a full implementation, you might create an inline form or redirect to admin panel
     await this.bot.telegram.answerCbQuery(
       callbackQuery.id,
       'Для изменения заказа обратитесь к админ-панели или свяжитесь с клиентом напрямую',
-    //   true
     );
+  }
+
+  private async fetchOrder(orderId: string) {
+    const { data: orderRow, error: orderError } = await supabase
+      .from('orders')
+      .select('*')
+      .eq('id', orderId)
+      .single();
+
+    if (orderError || !orderRow) return null;
+
+    const { data: customerRow } = await supabase
+      .from('customers')
+      .select('*')
+      .eq('id', orderRow.customer_id)
+      .maybeSingle();
+
+    const { data: itemRows } = await supabase
+      .from('order_items')
+      .select('*')
+      .eq('order_id', orderRow.id);
+
+    let productsById: Record<string, any> = {};
+    if (itemRows && itemRows.length) {
+      const { data: products } = await supabase
+        .from('products')
+        .select('*')
+        .in('id', itemRows.map(i => i.product_id));
+      if (products) {
+        productsById = Object.fromEntries(products.map(p => [p.id, p]));
+      }
+    }
+
+    return {
+      ...orderRow,
+      customer: customerRow,
+      items: (itemRows || []).map(ir => ({
+        ...ir,
+        product: productsById[ir.product_id]
+      }))
+    };
   }
 }

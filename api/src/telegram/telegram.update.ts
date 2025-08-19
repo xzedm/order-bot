@@ -15,6 +15,7 @@ interface UserSession {
     customerPhone?: string;
     customerEmail?: string;
     step: 'collecting_info' | 'confirming' | 'ready';
+    originalMessage?: string;
   };
   locale: 'ru' | 'en';
 }
@@ -134,6 +135,17 @@ export class TelegramUpdate {
     if (!session) {
       session = { messages: [], lastProducts: [], locale: 'ru' };
       this.userSessions.set(userId, session);
+    }
+
+    // If waiting for confirmation, handle Yes/No here
+    if (session.pendingOrder && session.pendingOrder.step === 'ready') {
+      await this.handleOrderConfirmation(
+        ctx,
+        session,
+        text,
+        session.pendingOrder.originalMessage || text
+      );
+      return;
     }
 
     // Check if it's an order status query
@@ -489,7 +501,8 @@ export class TelegramUpdate {
 
     await ctx.reply(message, { parse_mode: 'HTML' });
 
-    // Set up confirmation handler
+    // Store original request text for order logging and mark ready
+    pendingOrder.originalMessage = originalText;
     pendingOrder.step = 'ready';
     this.userSessions.set(ctx.from.id, session);
   }
@@ -600,7 +613,7 @@ export class TelegramUpdate {
     return statusMap[status] || status;
   }
 
-    private async handleOrderConfirmation(ctx: any, session: UserSession, text: string, originalMessage: string) {
+  private async handleOrderConfirmation(ctx: any, session: UserSession, text: string, originalMessage: string) {
     const userId = ctx.from.id;
     const locale = session.locale;
     const isConfirmed = /^(да|yes|y|д|\+)$/i.test(text.trim());

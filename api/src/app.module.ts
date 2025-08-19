@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { PrismaService } from './prisma/prisma.service';
 import { TelegramModule } from './telegram/telegram.module';
 import { ExtractionModule } from './extraction/extraction.module';
 import { ConversationModule } from './ai/conversation.module';
@@ -11,6 +10,6 @@ import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [TelegramModule, ExtractionModule, ConversationModule, ChatModule, ProductsModule, OrdersModule, NotificationsModule],
-  providers: [PrismaService, ProductService],
+  providers: [ProductService],
 })
 export class AppModule {}
