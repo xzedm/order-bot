@@ -2,6 +2,7 @@ export const synonyms: Record<string, string[]> = {
   battery: ['batareya', 'батарея', 'аккумулятор', 'battery pack'],
   charger: ['зарядка', 'adapter', 'питание', 'charging device'],
   motor: ['мотор', 'двигатель', 'engine', 'motor unit'],
+  rev: ['рев'],
 };
 
 

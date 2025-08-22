@@ -32,12 +32,32 @@ export class ProductService {
     // 4️⃣ Apply synonyms mapping
     query = normalizeWithSynonyms(query);
 
-    // 5️⃣ Tokenize query for multi-word searches
+    // 5️⃣ Try to extract full SKU token first (e.g., REV-41-1305-PK8)
+    const extractedSku = this.extractSkuFromText(name);
+    if (extractedSku) {
+      const bySku = await this.findBySku(extractedSku);
+      if (bySku) {
+        return [bySku];
+      }
+    }
+
+    // 6️⃣ Try to normalize potential product code like "rev-41" or "рев-41"
+    const normalizedCode = this.normalizeProductCode(query);
+
+    // 7️⃣ Tokenize query for multi-word searches
     const queryTokens = query.split(/\s+/).filter((token) => token.length > 0);
 
-    // 6️⃣ Try DB search (case-insensitive, partial matches for each token)
+    // 8️⃣ Try DB search (case-insensitive). Prefer SKU prefix/name match for product codes
     let dbQuery = supabase.from('products').select('*');
-    if (queryTokens.length > 0) {
+
+    if (normalizedCode) {
+      // Search by SKU prefix and also name containing the code
+      const code = normalizedCode; // already uppercased
+      dbQuery = dbQuery.or([
+        `sku.ilike.${code}%`,
+        `name.ilike.%${code}%`
+      ].join(','));
+    } else if (queryTokens.length > 0) {
       dbQuery = dbQuery.or(
         queryTokens
           .map((token) => `name.ilike.%${token}%`)
@@ -60,7 +80,7 @@ export class ProductService {
       return data;
     }
 
-    // 7️⃣ If no results → fuzzy + phonetic match in JS
+    // 9️⃣ If no results → fuzzy + phonetic match in JS (also try SKU contains for tokens)
     const { data: allProducts } = await supabase.from('products').select('*');
 
     if (!allProducts) return [];
@@ -78,7 +98,8 @@ export class ProductService {
       const productTokens = normalizedProductName.split(/\s+/);
 
       // ✅ Check each query token against product tokens
-      return queryTokens.some((queryToken) => {
+      const tokensToCheck = queryTokens.length ? queryTokens : [query];
+      return tokensToCheck.some((queryToken) => {
         const queryPhonetic = phonetic.process(queryToken)[0];
 
         return productTokens.some((productToken) => {
@@ -95,7 +116,10 @@ export class ProductService {
             queryPhonetic === phonetic.process(productToken)[0]
           );
         });
-      });
+      }) || (normalizedCode ? (
+        (p.sku && typeof p.sku === 'string' && p.sku.toUpperCase().startsWith(normalizedCode)) ||
+        (p.name && typeof p.name === 'string' && p.name.toUpperCase().includes(normalizedCode))
+      ) : false);
     });
 
     if (fuzzyMatches.length) {
@@ -125,5 +149,39 @@ export class ProductService {
       normalized = normalized.replace(new RegExp(from, 'g'), to);
     }
     return normalized;
+  }
+
+  // ✅ Normalize product codes like "рев-41" → "REV-41" and "rev41" → "REV-41"
+  private normalizeProductCode(text: string): string | null {
+    let t = text.trim().toLowerCase();
+    // Replace Cyrillic 'рев' with 'rev'
+    t = t.replace(/^\s*рев/gi, 'rev');
+    // Allow spaces or missing hyphen between prefix and digits
+    const m = t.match(/\b([a-z]{2,6})[\s-]?(\d{2,4})\b/);
+    if (!m) return null;
+    const prefix = m[1];
+    const digits = m[2];
+    // Only treat well-known hardware prefixes like rev, arduino codes etc. For now focus on REV
+    if (['rev'].includes(prefix)) {
+      return `${prefix.toUpperCase()}-${digits}`;
+    }
+    return null;
+  }
+
+  // ✅ Try to extract a concrete SKU token from free text
+  private extractSkuFromText(text: string): string | null {
+    if (!text) return null;
+    const m = text.match(/[A-Z]{2,6}-\d{2,4}(?:-[A-Z0-9]{2,10})+/i);
+    return m ? m[0].toUpperCase() : null;
+  }
+
+  // ✅ Find product by exact SKU
+  async findBySku(sku: string): Promise<Product | null> {
+    const { data, error } = await supabase.from('products').select('*').eq('sku', sku.toUpperCase()).maybeSingle();
+    if (error) {
+      console.error('[ProductService] Error fetching by SKU:', error.message);
+      return null;
+    }
+    return (data as any) || null;
   }
 }

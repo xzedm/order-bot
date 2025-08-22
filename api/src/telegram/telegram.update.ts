@@ -18,6 +18,8 @@ interface UserSession {
     originalMessage?: string;
   };
   locale: 'ru' | 'en';
+  collectedCustomerPhone?: string;
+  collectedCustomerName?: string;
 }
 
 @Update()
@@ -137,6 +139,9 @@ export class TelegramUpdate {
       this.userSessions.set(userId, session);
     }
 
+    // Opportunistically collect contact info even before order starts
+    this.tryCollectContactInfo(session, text);
+
     // If waiting for confirmation, handle Yes/No here
     if (session.pendingOrder && session.pendingOrder.step === 'ready') {
       await this.handleOrderConfirmation(
@@ -162,7 +167,14 @@ export class TelegramUpdate {
       const extracted = await this.extraction.extract(text);
       console.log('🔍 Extraction result:', extracted);
 
-      // Step 2: Handle different intents
+      // Step 2: Fast-path: if user typed what looks like a product code/prefix (e.g., REV-41), treat as quick order intent
+      if ((extracted.intent === 'product_inquiry' || extracted.intent === 'unknown') && this.isLikelyProductCodeOrSku(text)) {
+        const quickExtract = { intent: 'place_order', items: [{ name: text, qty: 1 }] } as any;
+        await this.handleOrderIntent(ctx, session, quickExtract, text);
+        return;
+      }
+
+      // Step 3: Handle different intents
       if (extracted.intent === 'place_order' && extracted.items?.length) {
         await this.handleOrderIntent(ctx, session, extracted, text);
       } else if (extracted.intent === 'product_inquiry') {
@@ -202,8 +214,12 @@ export class TelegramUpdate {
 
     // Try to match extracted items with lastProducts first
     const foundProducts: Product[] = [];
+    let ambiguousSets: Product[][] = [];
     for (const item of extracted.items) {
       const productName = item.english_name || item.name;
+      // Check for explicit SKU and/or quantity in the free-text
+      const explicitSku = this.extractSkuFromText(productName);
+      const explicitQty = this.extractQtyFromText(originalText) || item.qty;
       // First, check session.lastProducts for a match
       let product = session.lastProducts.find(p =>
         p.name.toLowerCase().includes(productName.toLowerCase()) ||
@@ -212,13 +228,26 @@ export class TelegramUpdate {
 
       // If no match in lastProducts, search the database
       if (!product) {
-        const matches = await this.productService.findByName(productName);
+        if (explicitSku) {
+          const bySku = await this.productService.findBySku(explicitSku);
+          if (bySku) {
+            product = bySku;
+          }
+        }
+        const matches = product ? [] : await this.productService.findByName(productName);
+        if (matches.length > 1 && this.isLikelyProductCodeOrSku(productName)) {
+          // Ambiguous code prefix like REV-41 -> ask user to choose specific SKU(s)
+          ambiguousSets.push(matches);
+          continue;
+        }
         if (matches.length > 0) {
           product = matches[0]; // Take the first match
         }
       }
 
       if (product) {
+        // Attach the resolved quantity if we parsed it
+        (product as any).__resolvedQty = explicitQty || item.qty || 1;
         foundProducts.push(product);
       } else {
         console.log(`⚠️ Product not found for: ${productName}`);
@@ -237,7 +266,7 @@ export class TelegramUpdate {
           return {
             name: product.name,
             sku: product.sku,
-            qty: requestedItem?.qty || 1, // Default to 1 if quantity not specified
+            qty: (product as any).__resolvedQty || requestedItem?.qty || 1, // Default to 1 if quantity not specified
             price: Number(product.price)
           };
         }),
@@ -255,7 +284,7 @@ export class TelegramUpdate {
           return {
             name: product.name,
             sku: product.sku,
-            qty: requestedItem?.qty || 1,
+            qty: (product as any).__resolvedQty || requestedItem?.qty || 1,
             price: Number(product.price)
           };
         })
@@ -265,11 +294,22 @@ export class TelegramUpdate {
     session.lastProducts = foundProducts;
     this.userSessions.set(userId, session);
 
-    if (foundProducts.length === 0) {
+    if (foundProducts.length === 0 && ambiguousSets.length === 0) {
       const message = session.locale === 'en'
         ? 'Sorry, I couldn\'t find any matching products. Could you please specify the exact product names or SKUs?'
         : 'Извините, я не смог найти подходящие товары. Можете уточнить точные названия или артикулы?';
       await ctx.reply(message);
+      return;
+    }
+
+    // If there are ambiguous sets, show options and ask the user to specify SKUs and quantities
+    if (ambiguousSets.length > 0) {
+      const flat = Array.from(new Map(ambiguousSets.flat().map(p => [p.sku, p])).values());
+      await this.showProductInfo(ctx, session, flat);
+      const ask = session.locale === 'en'
+        ? 'Please specify which SKU(s) you want and quantities (e.g., "REV-41-1303 x2, REV-41-1304 x1").'
+        : 'Пожалуйста, укажите какие именно артикула и количество (например, "REV-41-1303 x2, REV-41-1304 x1").';
+      await ctx.reply(ask);
       return;
     }
 
@@ -289,6 +329,14 @@ export class TelegramUpdate {
 
     const foundProducts: Product[] = [];
     for (const name of productNames) {
+      const explicitSku = this.extractSkuFromText(name) || this.extractSkuFromText(originalText);
+      if (explicitSku) {
+        const bySku = await this.productService.findBySku(explicitSku);
+        if (bySku) {
+          foundProducts.push(bySku);
+          continue;
+        }
+      }
       const matches = await this.productService.findByName(name);
       foundProducts.push(...matches);
     }
@@ -386,6 +434,14 @@ export class TelegramUpdate {
     // Update pending order with valid items
     session.pendingOrder!.items = validItems;
 
+    // Prefill from session-level collected info if present
+    if (!session.pendingOrder!.customerPhone && session.collectedCustomerPhone) {
+      session.pendingOrder!.customerPhone = session.collectedCustomerPhone;
+    }
+    if (!session.pendingOrder!.customerName && session.collectedCustomerName) {
+      session.pendingOrder!.customerName = session.collectedCustomerName;
+    }
+
     // Check what information is missing
     const missing = this.getMissingOrderInfo(session.pendingOrder!);
     
@@ -420,6 +476,8 @@ export class TelegramUpdate {
       if (!pendingOrder.customerPhone.startsWith('+7')) {
         pendingOrder.customerPhone = '+7' + pendingOrder.customerPhone.substring(1);
       }
+      // Persist to session-level too
+      session.collectedCustomerPhone = pendingOrder.customerPhone;
     }
 
     // Try to extract email
@@ -428,13 +486,16 @@ export class TelegramUpdate {
       pendingOrder.customerEmail = emailMatch[0];
     }
 
-    // Try to extract name (simple heuristic)
+    // Try to extract name (avoid taking product codes or greetings as name)
     if (!pendingOrder.customerName && !phoneMatch && !emailMatch) {
-      // If the message doesn't contain phone or email, assume it's a name
-      const words = text.trim().split(/\s+/);
-      if (words.length >= 1 && words.length <= 3) {
-        // Looks like a name
-        pendingOrder.customerName = text.trim();
+      const raw = text.trim();
+      const words = raw.split(/\s+/);
+      const looksLikeCode = this.isLikelyProductCodeOrSku(raw);
+      const looksTooShortOrSymbolic = /[\d_\-]/.test(raw) || raw.length < 2;
+      const isGreeting = this.isGreeting(raw);
+      if (!looksLikeCode && !looksTooShortOrSymbolic && !isGreeting && words.length >= 2 && words.length <= 4) {
+        pendingOrder.customerName = raw;
+        session.collectedCustomerName = raw;
       }
     }
 
@@ -475,6 +536,15 @@ export class TelegramUpdate {
     const pendingOrder = session.pendingOrder!;
     const locale = session.locale;
 
+    // Ensure we have a valid name before confirming; if missing or greeting-like, ask for it first
+    if (!pendingOrder.customerName || this.isGreeting(pendingOrder.customerName)) {
+      const prompt = locale === 'en' ? 'Please provide your full name:' : 'Пожалуйста, укажите ваше ФИО:';
+      await ctx.reply(prompt);
+      pendingOrder.step = 'collecting_info';
+      this.userSessions.set(ctx.from.id, session);
+      return;
+    }
+
     const totalAmount = pendingOrder.items.reduce(
       (sum, item) => sum + item.price * item.qty, 0
     );
@@ -510,26 +580,50 @@ export class TelegramUpdate {
   private async showProductInfo(ctx: any, session: UserSession, products: Product[]) {
     const locale = session.locale;
     
-    let message = locale === 'en' 
+    const header = locale === 'en' 
       ? '📦 <b>Product Information:</b>\n\n'
       : '📦 <b>Информация о товарах:</b>\n\n';
 
-    for (const product of products) {
-      message += `<b>${product.name}</b>\n`;
-      message += `${locale === 'en' ? 'SKU' : 'Артикул'}: <code>${product.sku}</code>\n`;
-      message += `${locale === 'en' ? 'Price' : 'Цена'}: ${product.price}₸\n`;
-      message += `${locale === 'en' ? 'In stock' : 'В наличии'}: ${product.qty} ${locale === 'en' ? 'pcs' : 'шт'}\n`;
+    // Build entries
+    const limited = products.slice(0, 15); // hard cap to 15 items
+    const entries = limited.map((product) => {
+      let block = `<b>${product.name}</b>\n`;
+      block += `${locale === 'en' ? 'SKU' : 'Артикул'}: <code>${product.sku}</code>\n`;
+      block += `${locale === 'en' ? 'Price' : 'Цена'}: ${product.price}₸\n`;
+      block += `${locale === 'en' ? 'In stock' : 'В наличии'}: ${product.qty} ${locale === 'en' ? 'pcs' : 'шт'}\n`;
       if (product.url) {
-        message += `${locale === 'en' ? 'More info' : 'Подробнее'}: ${product.url}\n`;
+        block += `${locale === 'en' ? 'More info' : 'Подробнее'}: ${product.url}\n`;
       }
-      message += '\n';
+      return block + '\n';
+    });
+
+    // Chunk by characters to keep under Telegram limit
+    const MAX_CHARS = 3500; // Safe under 4096
+    let current = header;
+    for (const entry of entries) {
+      if ((current + entry).length > MAX_CHARS) {
+        await ctx.reply(current, { parse_mode: 'HTML' });
+        current = entry; // Start new chunk without header to save space
+      } else {
+        current += entry;
+      }
     }
 
-    message += locale === 'en'
-      ? 'Would you like to order any of these products?'
-      : 'Хотите заказать какие-либо из этих товаров?';
+    // Append call-to-action
+    const moreNote = products.length > limited.length
+      ? (locale === 'en' ? `Showing first ${limited.length} results out of ${products.length}.\n` : `Показаны первые ${limited.length} из ${products.length} результатов.\n`)
+      : '';
+    const cta = (locale === 'en'
+      ? `${moreNote}Would you like to order any of these products? Please specify the SKU(s) and quantities (e.g., "REV-41-1303 x2").`
+      : `${moreNote}Хотите заказать какие-либо из этих товаров? Укажите артикулы и количество (например, "REV-41-1303 x2").`);
 
-    await ctx.reply(message, { parse_mode: 'HTML' });
+    if ((current + cta).length > MAX_CHARS) {
+      await ctx.reply(current, { parse_mode: 'HTML' });
+      await ctx.reply(cta, { parse_mode: 'HTML' });
+    } else {
+      current += cta;
+      await ctx.reply(current, { parse_mode: 'HTML' });
+    }
   }
 
   private async handleOrderStatusCheck(ctx: any, orderNumber: string) {
@@ -578,11 +672,9 @@ export class TelegramUpdate {
     if (!order!.customerPhone) {
       missing.push('Номер телефона');
     }
-    
-    // Name is optional but recommended
-    // if (!order!.customerName) {
-    //   missing.push('Имя');
-    // }
+    if (!order!.customerName) {
+      missing.push('Имя');
+    }
 
     return missing;
   }
@@ -611,6 +703,64 @@ export class TelegramUpdate {
     };
 
     return statusMap[status] || status;
+  }
+
+  private isGreeting(text: string): boolean {
+    const t = text.trim().toLowerCase();
+    const greetings = [
+      'привет', 'здравствуйте', 'салам', 'салем', 'салом', 'добрый день', 'доброе утро', 'добрый вечер',
+      'hi', 'hello', 'hey', 'good morning', 'good evening'
+    ];
+    return greetings.includes(t);
+  }
+
+  // Heuristic to detect if a free-text looks like a product code/SKU (e.g., REV-41, REV-41-1303, RPI4B-4GB)
+  private isLikelyProductCodeOrSku(text: string): boolean {
+    const t = text.trim();
+    // Contains uppercase letters with digits and hyphens or looks like code-like token
+    if (/^[A-Za-zА-Яа-я]{2,6}[\s\-]?\d{2,6}([\-A-Za-z0-9]{0,10})?$/.test(t)) return true;
+    if (/\bREV[\s\-]?\d{2,4}/i.test(t)) return true;
+    return false;
+  }
+
+  // Extract explicit SKU from user text (matches like REV-41-1305-PK8)
+  private extractSkuFromText(text: string): string | null {
+    if (!text) return null;
+    const m = text.match(/[A-Z]{2,6}-\d{2,4}(?:-[A-Z0-9]{2,10})+/i);
+    return m ? m[0].toUpperCase() : null;
+  }
+
+  // Extract quantity patterns like "x10", "10 шт", "10 штук", "10pcs"
+  private extractQtyFromText(text: string): number | null {
+    if (!text) return null;
+    // x10 or x 10
+    const xMatch = text.match(/x\s?(\d{1,4})/i);
+    if (xMatch) return parseInt(xMatch[1], 10);
+    // 10 шт|штук|pcs|pieces
+    const wordsMatch = text.match(/\b(\d{1,4})\s?(шт|штук|pcs|pieces)\b/i);
+    if (wordsMatch) return parseInt(wordsMatch[1], 10);
+    return null;
+  }
+
+  // Collect phone/name opportunistically even outside of an active order
+  private tryCollectContactInfo(session: UserSession, text: string) {
+    if (!text) return;
+    const phoneMatch = text.match(/(\+7|8|7)[\s\-]?(\d{3})[\s\-]?(\d{3})[\s\-]?(\d{2})[\s\-]?(\d{2})/);
+    if (phoneMatch && !session.collectedCustomerPhone) {
+      let phone = phoneMatch[0].replace(/[\s\-]/g, '');
+      if (!phone.startsWith('+7')) phone = '+7' + phone.substring(1);
+      session.collectedCustomerPhone = phone;
+    }
+
+    if (!session.collectedCustomerName) {
+      const raw = text.trim();
+      const words = raw.split(/\s+/);
+      const looksLikeCode = this.isLikelyProductCodeOrSku(raw);
+      const looksTooShortOrSymbolic = /[\d_\-]/.test(raw) || raw.length < 2;
+      if (!looksLikeCode && !looksTooShortOrSymbolic && words.length <= 4) {
+        session.collectedCustomerName = raw;
+      }
+    }
   }
 
   private async handleOrderConfirmation(ctx: any, session: UserSession, text: string, originalMessage: string) {
